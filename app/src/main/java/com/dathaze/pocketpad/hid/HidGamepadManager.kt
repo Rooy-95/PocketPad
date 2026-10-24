@@ -319,14 +319,15 @@ class HidGamepadManager(private val context: Context, private val listener: List
 
     private companion object {
         /**
-         * HID device subclass advertised over SDP. Hosts — TVs especially —
-         * filter their "input device" lists by this byte, so it must be one of
-         * the values the Bluetooth HID profile defines. COMBO (keyboard+pointer
-         * capable) is what off-the-shelf controllers and TV remotes report, and
-         * it is what Samsung's Input Device Manager expects to see; a bare
-         * gamepad subclass is skipped by some firmware.
+         * HID device subclass advertised over SDP.
+         *
+         * MOD: the original value was SUBCLASS1_COMBO (keyboard + pointer), chosen so
+         * Samsung TVs list the phone. For a tablet or an emulator it can make the host
+         * treat the phone as a keyboard and mouse, so it now announces itself as a
+         * gamepad. If the tablet stops showing the phone, change it back to:
+         *     BluetoothHidDevice.SUBCLASS1_COMBO
          */
-        const val SUBCLASS: Byte = BluetoothHidDevice.SUBCLASS1_COMBO
+        const val SUBCLASS: Byte = BluetoothHidDevice.SUBCLASS2_GAMEPAD
         const val MAX_REREGISTER_ATTEMPTS = 4
     }
 }
