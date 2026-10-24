@@ -236,38 +236,65 @@ class ControllerView @JvmOverloads constructor(
             }
         }
 
-        // A very short tap can press and release inside one emulator frame, so the
-        // game never sees it. Hold every press for at least this long.
-        private val minPressMs = 70L
-        private var downAt = 0L
-        private val releaseRunnable = Runnable { release() }
+        // Every tap must reach the game as a real press followed by a real release.
+        // - A press is held for at least minPressMs, so a very short tap cannot start
+        //   and end inside one emulator frame.
+        // - There is a gap of at least gapMs between a release and the next press, so
+        //   mashing the button is seen as many separate presses, not one long one.
+        private val minPressMs = 50L
+        private val gapMs = 20L
+        private var held = false          // what the host currently sees
+        private var heldAt = 0L
+        private var lastReleaseAt = 0L
+        private var wantDown = false      // finger is on the button
+        private var pendingPress = false  // a press still has to be delivered
+        private val syncRunnable = Runnable { sync() }
 
-        private fun release() {
-            touchState.setButton(buttonIndex, false)
-            setTrigger(0)
-            notifyChanged()
+        private fun sync() {
+            removeCallbacks(syncRunnable)
+            val now = SystemClock.uptimeMillis()
+            if (held && (!wantDown || pendingPress)) {
+                val wait = minPressMs - (now - heldAt)
+                if (wait > 0) {
+                    postDelayed(syncRunnable, wait)
+                    return
+                }
+                held = false
+                lastReleaseAt = now
+                touchState.setButton(buttonIndex, false)
+                setTrigger(0)
+                notifyChanged()
+            }
+            if (!held && pendingPress) {
+                val wait = gapMs - (now - lastReleaseAt)
+                if (wait > 0) {
+                    postDelayed(syncRunnable, wait)
+                    return
+                }
+                held = true
+                heldAt = now
+                pendingPress = false
+                touchState.setButton(buttonIndex, true)
+                setTrigger(255)
+                notifyChanged()
+            }
+            if (held && !wantDown) postDelayed(syncRunnable, minPressMs)
         }
 
         override fun onDown(x: Float, y: Float) {
-            removeCallbacks(releaseRunnable)
-            downAt = SystemClock.uptimeMillis()
-            touchState.setButton(buttonIndex, true)
-            setTrigger(255)
+            wantDown = true
+            pendingPress = true
             // Transmit first, buzz second. The vibrator call takes a moment to
             // return, and doing it first delays the press reaching the host.
-            notifyChanged()
+            sync()
             haptics.press()
             if (isHome) postDelayed(longPressRunnable, 700)
         }
 
         override fun onUp() {
             if (isHome) removeCallbacks(longPressRunnable)
-            val held = SystemClock.uptimeMillis() - downAt
-            if (held >= minPressMs) {
-                release()
-            } else {
-                postDelayed(releaseRunnable, minPressMs - held)
-            }
+            wantDown = false
+            sync()
         }
 
         /** L2/R2 are triggers, so they drive the analog axis as well as the
