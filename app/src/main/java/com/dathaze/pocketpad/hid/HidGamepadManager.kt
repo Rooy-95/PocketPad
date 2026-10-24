@@ -11,6 +11,7 @@ import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -148,14 +149,72 @@ class HidGamepadManager(private val context: Context, private val listener: List
      * lower latency and less battery.
      */
     fun send(state: GamepadState) {
-        val proxy = hidDevice ?: return
-        val device = connectedDevice ?: return
         val report = state.toReport()
-        if (lastReport?.contentEquals(report) == true) return
-        try {
-            proxy.sendReport(device, HidConstants.REPORT_ID, report)
-            lastReport = report
+        val last = lastReport
+        if (last != null && last.contentEquals(report)) {
+            clearPending()
+            return
+        }
+        // MOD: buttons and the d-pad always go out at once. Stick-only changes are
+        // limited to about 100 per second so they cannot queue up in front of a
+        // button press and delay it.
+        val onlyAxes = last != null &&
+            last[0] == report[0] && last[1] == report[1] && last[2] == report[2]
+        val now = SystemClock.uptimeMillis()
+        if (onlyAxes && now - lastSentAt < AXIS_MIN_INTERVAL_MS) {
+            pendingReport = report
+            mainHandler.removeCallbacks(flushRunnable)
+            mainHandler.postDelayed(flushRunnable, AXIS_MIN_INTERVAL_MS - (now - lastSentAt))
+            return
+        }
+        clearPending()
+        if (!transmit(report)) {
+            pendingReport = report
+            pendingTries = 0
+            mainHandler.postDelayed(flushRunnable, RETRY_INTERVAL_MS)
+        }
+    }
+
+    // MOD: a report the Bluetooth stack refuses is retried instead of being forgotten.
+    private var pendingReport: ByteArray? = null
+    private var pendingTries = 0
+    private var lastSentAt = 0L
+
+    private val flushRunnable = object : Runnable {
+        override fun run() {
+            val r = pendingReport ?: return
+            if (transmit(r)) {
+                pendingReport = null
+                pendingTries = 0
+            } else if (++pendingTries < MAX_RETRIES) {
+                mainHandler.postDelayed(this, RETRY_INTERVAL_MS)
+            } else {
+                pendingReport = null
+                pendingTries = 0
+            }
+        }
+    }
+
+    private fun clearPending() {
+        mainHandler.removeCallbacks(flushRunnable)
+        pendingReport = null
+        pendingTries = 0
+    }
+
+    private fun transmit(report: ByteArray): Boolean {
+        val proxy = hidDevice ?: return false
+        val device = connectedDevice ?: return false
+        return try {
+            val ok = proxy.sendReport(device, HidConstants.REPORT_ID, report)
+            if (ok) {
+                lastReport = report
+                lastSentAt = SystemClock.uptimeMillis()
+            } else {
+                lastReport = null
+            }
+            ok
         } catch (_: SecurityException) {
+            false
         }
     }
 
@@ -257,6 +316,7 @@ class HidGamepadManager(private val context: Context, private val listener: List
                     if (connectedDevice == device) connectedDevice = null
                     lastReport = null
                     lastKey = HidConstants.KEY_NONE
+                    clearPending()
                     post { listener.onHidDisconnected() }
                 }
             }
@@ -329,5 +389,8 @@ class HidGamepadManager(private val context: Context, private val listener: List
          */
         const val SUBCLASS: Byte = BluetoothHidDevice.SUBCLASS2_GAMEPAD
         const val MAX_REREGISTER_ATTEMPTS = 4
+        const val AXIS_MIN_INTERVAL_MS = 10L
+        const val RETRY_INTERVAL_MS = 10L
+        const val MAX_RETRIES = 6
     }
 }
