@@ -45,6 +45,9 @@ import kotlin.math.roundToInt
  *
  * The view draws and hit-tests every control itself so multitouch works
  * naturally. Layout adapts to portrait/landscape in [onSizeChanged].
+ *
+ * MOD: in layout edit mode an "AJUSTES" pill (top centre) opens a small panel
+ * to change button size, stick/d-pad size, stick dead zone and sensitivity.
  */
 class ControllerView @JvmOverloads constructor(
     context: Context,
@@ -52,6 +55,21 @@ class ControllerView @JvmOverloads constructor(
 ) : View(context, attrs) {
 
     enum class Skin { PS, XBOX, SNES, NES, GAMEBOY }
+
+    /**
+     * Extra pad designs (PSP and the Sega consoles). They are chosen from the
+     * AJUSTES panel in layout edit mode and, when not NONE, replace the skin.
+     */
+    enum class Extra(val title: String) {
+        NONE("Ninguno"),
+        PSP("PSP"),
+        MASTER_SYSTEM("Master Sys"),
+        MEGADRIVE3("MegaDrive 3"),
+        MEGADRIVE6("MegaDrive 6"),
+        SATURN("Saturn"),
+        DREAMCAST("Dreamcast"),
+        GAMEGEAR("Game Gear")
+    }
 
     /** Connection state shown by the halo around the PS/home button. */
     enum class LinkState { IDLE, DISCOVERABLE, CONNECTED }
@@ -84,6 +102,10 @@ class ControllerView @JvmOverloads constructor(
         set(value) {
             if (field == value) return
             field = value
+            if (extra != Extra.NONE && value.name != extraBase) {
+                extra = Extra.NONE
+                saveExtra()
+            }
             releaseAllPointers()
             applySkin()
             if (width > 0 && height > 0) layoutControls(width.toFloat(), height.toFloat())
@@ -96,6 +118,8 @@ class ControllerView @JvmOverloads constructor(
         var cx = 0f
         var cy = 0f
         var radius = 0f
+        /** Radius before the user's size setting is applied. */
+        var baseRadius = 0f
         var pointerId = -1
         val pressed: Boolean get() = pointerId != -1
 
@@ -489,9 +513,25 @@ class ControllerView @JvmOverloads constructor(
             }
             knobX = dx
             knobY = dy
+
+            // MOD: radial dead zone + sensitivity (gain) from the edit panel.
+            var nx = if (max > 0f) dx / max else 0f
+            var ny = if (max > 0f) dy / max else 0f
+            val mag = hypot(nx.toDouble(), ny.toDouble()).toFloat()
+            val dz = deadzonePct / 100f
+            if (mag <= dz || mag <= 0f) {
+                nx = 0f
+                ny = 0f
+            } else {
+                val scaled = ((mag - dz) / (1f - dz)) * (sensitivityPct / 100f)
+                val k = min(scaled, 1f) / mag
+                nx *= k
+                ny *= k
+            }
+
             setAxes(
-                (128 + (dx / max) * 127).roundToInt().coerceIn(0, 255),
-                (128 + (dy / max) * 127).roundToInt().coerceIn(0, 255)
+                (128 + nx * 127).roundToInt().coerceIn(0, 255),
+                (128 + ny * 127).roundToInt().coerceIn(0, 255)
             )
         }
 
@@ -690,6 +730,13 @@ class ControllerView @JvmOverloads constructor(
     private val nesColor = Color.parseColor("#E4404A")
     private val gbColor = Color.parseColor("#B48CC8")
 
+    // Sega pads: light labels on dark buttons; Dreamcast keeps its own colours.
+    private val segaLabel = Color.parseColor("#D9DCEA")
+    private val dcA = Color.parseColor("#E4472D")
+    private val dcB = Color.parseColor("#F2C230")
+    private val dcX = Color.parseColor("#2E7BD4")
+    private val dcY = Color.parseColor("#6CC24A")
+
     // ---------------------------------------------------------------- layout
 
     // Positional face buttons: bottom/right/left/top — HID mapping is fixed,
@@ -728,6 +775,218 @@ class ControllerView @JvmOverloads constructor(
 
     private val layoutPrefs =
         context.getSharedPreferences("pocketpad_layouts", Context.MODE_PRIVATE)
+
+    // ------------------------------------------------- MOD: user settings
+    // Saved in the same preferences file as the layouts.
+
+    /** Size of face/shoulder/menu buttons, in percent (60..200). */
+    private var buttonSizePct = layoutPrefs.getInt("btn_size", 100)
+
+    /** Size of the sticks and the d-pad, in percent (60..200). */
+    private var stickSizePct = layoutPrefs.getInt("stick_size", 100)
+
+    /** Radial dead zone of the analog sticks, in percent (0..30). */
+    private var deadzonePct = layoutPrefs.getInt("deadzone", 0)
+
+    /** Stick gain, in percent (50..150). 100 = unchanged. */
+    private var sensitivityPct = layoutPrefs.getInt("sensitivity", 100)
+
+    /** Extra design in use (NONE = the normal skin) and the skin it was chosen over. */
+    private var extra: Extra = try {
+        Extra.valueOf(layoutPrefs.getString("extra_style", "NONE") ?: "NONE")
+    } catch (e: Exception) {
+        Extra.NONE
+    }
+    private var extraBase: String = layoutPrefs.getString("extra_base", "") ?: ""
+
+    private fun saveExtra() {
+        layoutPrefs.edit()
+            .putString("extra_style", extra.name)
+            .putString("extra_base", extraBase)
+            .apply()
+    }
+
+    private fun setExtraStyle(e: Extra) {
+        releaseAllPointers()
+        extra = e
+        extraBase = skin.name
+        saveExtra()
+        applySkin()
+        relayout()
+        invalidate()
+    }
+
+    private fun scaleFor(c: Control): Float = when {
+        c === gear -> 1f
+        c === dpad || c === leftStick || c === rightStick -> stickSizePct / 100f
+        else -> buttonSizePct / 100f
+    }
+
+    /** Re-apply the size settings without moving anything. */
+    private fun applyScales() {
+        for (c in controlKeys.values) c.radius = c.baseRadius * scaleFor(c)
+        invalidate()
+    }
+
+    private fun adjustSetting(row: Int, dir: Int) {
+        when (row) {
+            0 -> buttonSizePct = (buttonSizePct + dir * 10).coerceIn(60, 200)
+            1 -> stickSizePct = (stickSizePct + dir * 10).coerceIn(60, 200)
+            2 -> deadzonePct = (deadzonePct + dir).coerceIn(0, 30)
+            3 -> sensitivityPct = (sensitivityPct + dir * 5).coerceIn(50, 150)
+            4 -> {
+                val all = Extra.values()
+                setExtraStyle(all[(extra.ordinal + dir + all.size) % all.size])
+            }
+        }
+        layoutPrefs.edit()
+            .putInt("btn_size", buttonSizePct)
+            .putInt("stick_size", stickSizePct)
+            .putInt("deadzone", deadzonePct)
+            .putInt("sensitivity", sensitivityPct)
+            .apply()
+        haptics.tick()
+        if (row < 2) applyScales() else invalidate()
+    }
+
+    // ------------------------------------------- MOD: edit-mode settings UI
+
+    private var settingsOpen = false
+    private val pillRect = RectF()
+    private val panelRect = RectF()
+    private val closeRect = RectF()
+    private val minusRects = Array(5) { RectF() }
+    private val plusRects = Array(5) { RectF() }
+    private val panelLabels = arrayOf("Botones", "Sticks y cruz", "Zona muerta", "Sensibilidad", "Diseño")
+    private val panelFill = Color.parseColor("#1B1E2A")
+    private val panelButtonFill = Color.parseColor("#2C3048")
+
+    private val dp: Float get() = resources.displayMetrics.density
+
+    private fun computeEditUi() {
+        val d = dp
+        val pillW = 120f * d
+        val pillH = 34f * d
+        val pillTop = safeTop + 6f * d
+        pillRect.set((width - pillW) / 2f, pillTop, (width + pillW) / 2f, pillTop + pillH)
+
+        val rowH = 44f * d
+        val headH = 40f * d
+        val footH = 52f * d
+        val panelW = min(width.toFloat() - 24f * d, 420f * d)
+        val panelH = headH + rowH * 5 + footH
+        val left = (width - panelW) / 2f
+        val top = max(safeTop + 8f * d, (height - panelH) / 2f)
+        panelRect.set(left, top, left + panelW, top + panelH)
+
+        val btn = 40f * d
+        for (i in 0 until 5) {
+            val rowCy = top + headH + rowH * i + rowH / 2f
+            val plusRight = left + panelW - 12f * d
+            plusRects[i].set(plusRight - btn, rowCy - btn / 2f, plusRight, rowCy + btn / 2f)
+            val minusRight = plusRects[i].left - 110f * d
+            minusRects[i].set(minusRight - btn, rowCy - btn / 2f, minusRight, rowCy + btn / 2f)
+        }
+        val closeW = 140f * d
+        closeRect.set(
+            left + (panelW - closeW) / 2f,
+            top + panelH - footH + 8f * d,
+            left + (panelW + closeW) / 2f,
+            top + panelH - 8f * d
+        )
+    }
+
+    private fun drawLabel(
+        canvas: Canvas, text: String, x: Float, cyText: Float, size: Float, color: Int,
+        align: Paint.Align = Paint.Align.CENTER
+    ) {
+        textPaint.textAlign = align
+        textPaint.textSize = size
+        textPaint.color = color
+        val baseline = cyText - (textPaint.ascent() + textPaint.descent()) / 2f
+        canvas.drawText(text, x, baseline, textPaint)
+        textPaint.textAlign = Paint.Align.CENTER
+    }
+
+    private fun drawEditUi(canvas: Canvas) {
+        computeEditUi()
+        val d = dp
+        moldPaint.shader = null
+
+        if (!settingsOpen) {
+            val rr = pillRect.height() / 2f
+            moldPaint.color = withAlpha(Color.BLACK, 190)
+            canvas.drawRoundRect(pillRect, rr, rr, moldPaint)
+            strokePaint.color = accentColor
+            canvas.drawRoundRect(pillRect, rr, rr, strokePaint)
+            drawLabel(canvas, "AJUSTES", pillRect.centerX(), pillRect.centerY(), 13f * d, textColor)
+            return
+        }
+
+        canvas.drawColor(withAlpha(Color.BLACK, 130))
+        moldPaint.color = panelFill
+        canvas.drawRoundRect(panelRect, 18f * d, 18f * d, moldPaint)
+        strokePaint.color = outlineColor
+        canvas.drawRoundRect(panelRect, 18f * d, 18f * d, strokePaint)
+        drawLabel(
+            canvas, "Ajustes del mando", panelRect.centerX(), panelRect.top + 26f * d,
+            16f * d, textColor
+        )
+
+        val values = arrayOf(
+            "$buttonSizePct%", "$stickSizePct%", "$deadzonePct%", "$sensitivityPct%", extra.title
+        )
+        for (i in 0 until 5) {
+            val rowCy = minusRects[i].centerY()
+            drawLabel(
+                canvas, panelLabels[i], panelRect.left + 16f * d, rowCy, 13f * d, textColor,
+                Paint.Align.LEFT
+            )
+            for (r in arrayOf(minusRects[i], plusRects[i])) {
+                moldPaint.color = panelButtonFill
+                canvas.drawRoundRect(r, 10f * d, 10f * d, moldPaint)
+            }
+            drawLabel(canvas, "−", minusRects[i].centerX(), minusRects[i].centerY(), 24f * d, textColor)
+            drawLabel(canvas, "+", plusRects[i].centerX(), plusRects[i].centerY(), 24f * d, textColor)
+            drawLabel(
+                canvas, values[i], (minusRects[i].right + plusRects[i].left) / 2f, rowCy,
+                14f * d, neonCyan
+            )
+        }
+
+        moldPaint.color = accentColor
+        canvas.drawRoundRect(closeRect, 12f * d, 12f * d, moldPaint)
+        drawLabel(canvas, "Cerrar", closeRect.centerX(), closeRect.centerY(), 15f * d, Color.WHITE)
+    }
+
+    /** Returns true when the tap was consumed by the settings UI. */
+    private fun handleEditUiTap(x: Float, y: Float): Boolean {
+        computeEditUi()
+        if (settingsOpen) {
+            if (closeRect.contains(x, y)) {
+                settingsOpen = false
+                return true
+            }
+            for (i in 0 until 5) {
+                if (minusRects[i].contains(x, y)) {
+                    adjustSetting(i, -1)
+                    return true
+                }
+                if (plusRects[i].contains(x, y)) {
+                    adjustSetting(i, 1)
+                    return true
+                }
+            }
+            if (!panelRect.contains(x, y)) settingsOpen = false
+            return true
+        }
+        if (pillRect.contains(x, y)) {
+            settingsOpen = true
+            haptics.tick()
+            return true
+        }
+        return false
+    }
 
     /** True while the user is dragging buttons around. */
     var isEditingLayout = false
@@ -785,6 +1044,7 @@ class ControllerView @JvmOverloads constructor(
 
     fun enterLayoutEditMode() {
         releaseAllPointers()
+        settingsOpen = false
         isEditingLayout = true
         invalidate()
     }
@@ -799,6 +1059,7 @@ class ControllerView @JvmOverloads constructor(
             }
             layoutPrefs.edit().putString(layoutPrefKey(), serialized).apply()
         }
+        settingsOpen = false
         isEditingLayout = false
         invalidate()
     }
@@ -812,13 +1073,14 @@ class ControllerView @JvmOverloads constructor(
 
     /** Exit without saving; reload whatever was stored (or the default). */
     fun cancelLayoutEdit() {
+        settingsOpen = false
         isEditingLayout = false
         relayout()
         invalidate()
     }
 
     private fun layoutPrefKey(): String =
-        "${skin.name}_${if (height >= width) "P" else "L"}"
+        "${if (extra != Extra.NONE) "X_" + extra.name else skin.name}_${if (height >= width) "P" else "L"}"
 
     private fun safeWidth() = (width - safeLeft - safeRight).coerceAtLeast(1f)
     private fun safeHeight() = (height - safeTop - safeBottom).coerceAtLeast(1f)
@@ -870,6 +1132,10 @@ class ControllerView @JvmOverloads constructor(
     }
 
     private fun applySkin() {
+        if (extra != Extra.NONE) {
+            applyExtra()
+            return
+        }
         when (skin) {
             Skin.PS -> {
                 faceBottom.label = "✕"; faceBottom.labelColor = psCrossColor; faceBottom.labelScale = 1f
@@ -960,6 +1226,11 @@ class ControllerView @JvmOverloads constructor(
         offY = safeTop
         val w = (fullW - safeLeft - safeRight).coerceAtLeast(1f)
         val h = (fullH - safeTop - safeBottom).coerceAtLeast(1f)
+        if (extra != Extra.NONE) {
+            layoutExtra(w, h)
+            applySavedLayout()
+            return
+        }
         val portrait = h >= w
         when (skin) {
             Skin.PS -> if (portrait) layoutPsPortrait(w, h) else layoutPsLandscape(w, h)
@@ -974,7 +1245,8 @@ class ControllerView @JvmOverloads constructor(
     private fun place(c: Control, x: Float, y: Float, r: Float) {
         c.cx = offX + x
         c.cy = offY + y
-        c.radius = r
+        c.baseRadius = r
+        c.radius = r * scaleFor(c)
     }
 
     // ------------------------------------------------------------ PS layouts
@@ -1162,6 +1434,295 @@ class ControllerView @JvmOverloads constructor(
         place(gear, w * 0.05f, h * 0.90f, small * 0.9f)
     }
 
+    // ------------------------------------------------- PSP / SEGA designs
+
+    private fun applyExtra() {
+        when (extra) {
+            Extra.NONE -> Unit
+            Extra.PSP -> {
+                faceBottom.label = "✕"; faceBottom.labelColor = psCrossColor; faceBottom.labelScale = 1f
+                faceRight.label = "○"; faceRight.labelColor = psCircleColor; faceRight.labelScale = 1f
+                faceLeft.label = "□"; faceLeft.labelColor = psSquareColor; faceLeft.labelScale = 1f
+                faceTop.label = "△"; faceTop.labelColor = psTriangleColor; faceTop.labelScale = 1f
+                btnL1.label = "L"; btnR1.label = "R"
+                btnShare.label = "SELECT"; btnShare.labelScale = 0.34f
+                btnOptions.label = "START"; btnOptions.labelScale = 0.34f
+                btnHome.label = "⌂"
+                activeControls = listOf(
+                    dpad, leftStick, faceTop, faceRight, faceBottom, faceLeft,
+                    btnL1, btnR1, btnShare, btnOptions, btnHome, gear
+                )
+            }
+            Extra.MASTER_SYSTEM, Extra.GAMEGEAR -> {
+                faceBottom.label = "1"; faceBottom.labelColor = segaLabel; faceBottom.labelScale = 0.9f
+                faceRight.label = "2"; faceRight.labelColor = segaLabel; faceRight.labelScale = 0.9f
+                btnOptions.label = if (extra == Extra.GAMEGEAR) "START" else "PAUSE"
+                btnOptions.labelScale = 0.34f
+                btnHome.label = "⌂"
+                activeControls = listOf(dpad, faceBottom, faceRight, btnOptions, btnHome, gear)
+            }
+            Extra.MEGADRIVE3 -> {
+                faceLeft.label = "A"; faceLeft.labelColor = segaLabel; faceLeft.labelScale = 0.9f
+                faceBottom.label = "B"; faceBottom.labelColor = segaLabel; faceBottom.labelScale = 0.9f
+                faceRight.label = "C"; faceRight.labelColor = segaLabel; faceRight.labelScale = 0.9f
+                btnOptions.label = "START"; btnOptions.labelScale = 0.34f
+                btnHome.label = "⌂"
+                activeControls = listOf(
+                    dpad, faceLeft, faceBottom, faceRight, btnOptions, btnHome, gear
+                )
+            }
+            Extra.MEGADRIVE6 -> {
+                faceLeft.label = "A"; faceLeft.labelColor = segaLabel; faceLeft.labelScale = 0.9f
+                faceBottom.label = "B"; faceBottom.labelColor = segaLabel; faceBottom.labelScale = 0.9f
+                faceRight.label = "C"; faceRight.labelColor = segaLabel; faceRight.labelScale = 0.9f
+                btnL1.label = "X"; faceTop.label = "Y"; btnR1.label = "Z"
+                faceTop.labelColor = segaLabel; faceTop.labelScale = 0.9f
+                btnShare.label = "MODE"; btnShare.labelScale = 0.34f
+                btnOptions.label = "START"; btnOptions.labelScale = 0.34f
+                btnHome.label = "⌂"
+                activeControls = listOf(
+                    dpad, faceLeft, faceBottom, faceRight, btnL1, faceTop, btnR1,
+                    btnShare, btnOptions, btnHome, gear
+                )
+            }
+            Extra.SATURN -> {
+                faceLeft.label = "A"; faceLeft.labelColor = segaLabel; faceLeft.labelScale = 0.9f
+                faceBottom.label = "B"; faceBottom.labelColor = segaLabel; faceBottom.labelScale = 0.9f
+                faceRight.label = "C"; faceRight.labelColor = segaLabel; faceRight.labelScale = 0.9f
+                btnL1.label = "X"; faceTop.label = "Y"; btnR1.label = "Z"
+                faceTop.labelColor = segaLabel; faceTop.labelScale = 0.9f
+                btnL2.label = "L"; btnR2.label = "R"
+                btnOptions.label = "START"; btnOptions.labelScale = 0.34f
+                btnHome.label = "⌂"
+                activeControls = listOf(
+                    dpad, faceLeft, faceBottom, faceRight, btnL1, faceTop, btnR1,
+                    btnL2, btnR2, btnOptions, btnHome, gear
+                )
+            }
+            Extra.DREAMCAST -> {
+                faceBottom.label = "A"; faceBottom.labelColor = dcA; faceBottom.labelScale = 0.9f
+                faceRight.label = "B"; faceRight.labelColor = dcB; faceRight.labelScale = 0.9f
+                faceLeft.label = "X"; faceLeft.labelColor = dcX; faceLeft.labelScale = 0.9f
+                faceTop.label = "Y"; faceTop.labelColor = dcY; faceTop.labelScale = 0.9f
+                btnL2.label = "L"; btnR2.label = "R"
+                btnOptions.label = "START"; btnOptions.labelScale = 0.34f
+                btnHome.label = "⌂"
+                activeControls = listOf(
+                    dpad, leftStick, faceTop, faceRight, faceBottom, faceLeft,
+                    btnL2, btnR2, btnOptions, btnHome, gear
+                )
+            }
+        }
+    }
+
+    private fun layoutExtra(w: Float, h: Float) {
+        when (extra) {
+            Extra.NONE -> Unit
+            Extra.PSP -> layoutPsp(w, h)
+            Extra.MASTER_SYSTEM, Extra.GAMEGEAR -> layoutTwoButton(w, h)
+            Extra.MEGADRIVE3 -> layoutGenesis(w, h, six = false)
+            Extra.MEGADRIVE6 -> layoutGenesis(w, h, six = true)
+            Extra.SATURN -> layoutSaturn(w, h)
+            Extra.DREAMCAST -> layoutDreamcast(w, h)
+        }
+    }
+
+    private fun layoutPsp(w: Float, h: Float) {
+        if (h >= w) {
+            val unit = min(w, h * 0.46f)
+            val small = unit * 0.076f
+            val face = unit * 0.082f
+            place(btnL1, w * 0.12f, h * 0.10f, small)
+            place(btnR1, w * 0.88f, h * 0.10f, small)
+            place(dpad, w * 0.26f, h * 0.30f, unit * 0.20f)
+            val fx = w * 0.74f
+            val fy = h * 0.30f
+            val off = unit * 0.145f
+            place(faceTop, fx, fy - off, face)
+            place(faceRight, fx + off, fy, face)
+            place(faceBottom, fx, fy + off, face)
+            place(faceLeft, fx - off, fy, face)
+            place(leftStick, w * 0.26f, h * 0.55f, unit * 0.14f)
+            place(btnShare, w * 0.30f, h * 0.78f, small)
+            place(btnOptions, w * 0.70f, h * 0.78f, small)
+            place(btnHome, w * 0.50f, h * 0.66f, small)
+            place(gear, w * 0.08f, h * 0.92f, small * 0.9f)
+        } else {
+            val unit = min(h, w * 0.46f)
+            val small = unit * 0.076f
+            val face = unit * 0.095f
+            place(btnL1, w * 0.09f, h * 0.14f, small)
+            place(btnR1, w * 0.91f, h * 0.14f, small)
+            place(dpad, w * 0.16f, h * 0.42f, unit * 0.21f)
+            place(leftStick, w * 0.16f, h * 0.80f, unit * 0.12f)
+            val fx = w * 0.84f
+            val fy = h * 0.46f
+            val off = unit * 0.165f
+            place(faceTop, fx, fy - off, face)
+            place(faceRight, fx + off, fy, face)
+            place(faceBottom, fx, fy + off, face)
+            place(faceLeft, fx - off, fy, face)
+            place(btnShare, w * 0.40f, h * 0.90f, small)
+            place(btnOptions, w * 0.60f, h * 0.90f, small)
+            place(btnHome, w * 0.50f, h * 0.50f, small)
+            place(gear, w * 0.05f, h * 0.10f, small * 0.9f)
+        }
+    }
+
+    /** Master System and Game Gear: d-pad plus buttons 1 and 2. */
+    private fun layoutTwoButton(w: Float, h: Float) {
+        if (h >= w) {
+            val unit = min(w, h * 0.46f)
+            val small = unit * 0.08f
+            val face = unit * 0.10f
+            place(dpad, w * 0.26f, h * 0.34f, unit * 0.20f)
+            place(faceBottom, w * 0.62f, h * 0.40f, face)
+            place(faceRight, w * 0.84f, h * 0.40f, face)
+            place(btnOptions, w * 0.50f, h * 0.58f, small)
+            place(btnHome, w * 0.50f, h * 0.70f, small)
+            place(gear, w * 0.08f, h * 0.92f, small * 0.9f)
+        } else {
+            val unit = min(h, w * 0.46f)
+            val small = unit * 0.08f
+            val face = unit * 0.115f
+            place(dpad, w * 0.16f, h * 0.55f, unit * 0.22f)
+            place(faceBottom, w * 0.76f, h * 0.58f, face)
+            place(faceRight, w * 0.90f, h * 0.58f, face)
+            place(btnOptions, w * 0.50f, h * 0.22f, small)
+            place(btnHome, w * 0.50f, h * 0.50f, small)
+            place(gear, w * 0.05f, h * 0.90f, small * 0.9f)
+        }
+    }
+
+    /** Mega Drive / Genesis: 3 buttons (A B C) or 6 buttons (plus X Y Z and MODE). */
+    private fun layoutGenesis(w: Float, h: Float, six: Boolean) {
+        if (h >= w) {
+            val unit = min(w, h * 0.46f)
+            val small = unit * 0.075f
+            place(dpad, w * 0.24f, h * 0.34f, unit * 0.19f)
+            if (!six) {
+                val r = unit * 0.075f
+                place(faceLeft, w * 0.54f, h * 0.46f, r)
+                place(faceBottom, w * 0.70f, h * 0.40f, r)
+                place(faceRight, w * 0.86f, h * 0.34f, r)
+                place(btnOptions, w * 0.50f, h * 0.62f, small)
+            } else {
+                val r = unit * 0.065f
+                place(faceLeft, w * 0.56f, h * 0.46f, r)
+                place(faceBottom, w * 0.73f, h * 0.46f, r)
+                place(faceRight, w * 0.90f, h * 0.46f, r)
+                place(btnL1, w * 0.56f, h * 0.36f, r)
+                place(faceTop, w * 0.73f, h * 0.36f, r)
+                place(btnR1, w * 0.90f, h * 0.36f, r)
+                place(btnShare, w * 0.30f, h * 0.64f, small)
+                place(btnOptions, w * 0.70f, h * 0.64f, small)
+            }
+            place(btnHome, w * 0.50f, h * 0.74f, small)
+            place(gear, w * 0.08f, h * 0.92f, small * 0.9f)
+        } else {
+            val unit = min(h, w * 0.46f)
+            val small = unit * 0.08f
+            place(dpad, w * 0.16f, h * 0.55f, unit * 0.22f)
+            if (!six) {
+                val r = unit * 0.10f
+                place(faceLeft, w * 0.64f, h * 0.66f, r)
+                place(faceBottom, w * 0.76f, h * 0.58f, r)
+                place(faceRight, w * 0.88f, h * 0.50f, r)
+                place(btnOptions, w * 0.50f, h * 0.22f, small)
+            } else {
+                val r = unit * 0.085f
+                place(faceLeft, w * 0.66f, h * 0.68f, r)
+                place(faceBottom, w * 0.77f, h * 0.68f, r)
+                place(faceRight, w * 0.88f, h * 0.68f, r)
+                place(btnL1, w * 0.66f, h * 0.42f, r)
+                place(faceTop, w * 0.77f, h * 0.42f, r)
+                place(btnR1, w * 0.88f, h * 0.42f, r)
+                place(btnShare, w * 0.38f, h * 0.22f, small)
+                place(btnOptions, w * 0.62f, h * 0.22f, small)
+            }
+            place(btnHome, w * 0.50f, h * 0.50f, small)
+            place(gear, w * 0.05f, h * 0.90f, small * 0.9f)
+        }
+    }
+
+    /** Saturn: A B C, X Y Z, shoulders L and R, Start. */
+    private fun layoutSaturn(w: Float, h: Float) {
+        if (h >= w) {
+            val unit = min(w, h * 0.46f)
+            val small = unit * 0.075f
+            val r = unit * 0.065f
+            place(btnL2, w * 0.12f, h * 0.10f, small)
+            place(btnR2, w * 0.88f, h * 0.10f, small)
+            place(dpad, w * 0.24f, h * 0.34f, unit * 0.19f)
+            place(faceLeft, w * 0.56f, h * 0.46f, r)
+            place(faceBottom, w * 0.73f, h * 0.46f, r)
+            place(faceRight, w * 0.90f, h * 0.46f, r)
+            place(btnL1, w * 0.56f, h * 0.36f, r)
+            place(faceTop, w * 0.73f, h * 0.36f, r)
+            place(btnR1, w * 0.90f, h * 0.36f, r)
+            place(btnOptions, w * 0.50f, h * 0.62f, small)
+            place(btnHome, w * 0.50f, h * 0.74f, small)
+            place(gear, w * 0.08f, h * 0.92f, small * 0.9f)
+        } else {
+            val unit = min(h, w * 0.46f)
+            val small = unit * 0.08f
+            val r = unit * 0.085f
+            place(btnL2, w * 0.09f, h * 0.14f, small)
+            place(btnR2, w * 0.91f, h * 0.14f, small)
+            place(dpad, w * 0.16f, h * 0.55f, unit * 0.22f)
+            place(faceLeft, w * 0.68f, h * 0.70f, r)
+            place(faceBottom, w * 0.78f, h * 0.70f, r)
+            place(faceRight, w * 0.88f, h * 0.70f, r)
+            place(btnL1, w * 0.68f, h * 0.46f, r)
+            place(faceTop, w * 0.78f, h * 0.46f, r)
+            place(btnR1, w * 0.88f, h * 0.46f, r)
+            place(btnOptions, w * 0.50f, h * 0.30f, small)
+            place(btnHome, w * 0.50f, h * 0.55f, small)
+            place(gear, w * 0.05f, h * 0.90f, small * 0.9f)
+        }
+    }
+
+    /** Dreamcast: d-pad, analog stick, A B X Y diamond, triggers L and R, Start. */
+    private fun layoutDreamcast(w: Float, h: Float) {
+        if (h >= w) {
+            val unit = min(w, h * 0.46f)
+            val small = unit * 0.076f
+            val face = unit * 0.078f
+            place(btnL2, w * 0.12f, h * 0.09f, small)
+            place(btnR2, w * 0.88f, h * 0.09f, small)
+            place(dpad, w * 0.26f, h * 0.26f, unit * 0.19f)
+            val fx = w * 0.74f
+            val fy = h * 0.28f
+            val off = unit * 0.14f
+            place(faceTop, fx, fy - off, face)
+            place(faceRight, fx + off, fy, face)
+            place(faceBottom, fx, fy + off, face)
+            place(faceLeft, fx - off, fy, face)
+            place(leftStick, w * 0.30f, h * 0.56f, unit * 0.155f)
+            place(btnOptions, w * 0.72f, h * 0.56f, small)
+            place(btnHome, w * 0.72f, h * 0.70f, small)
+            place(gear, w * 0.08f, h * 0.92f, small * 0.9f)
+        } else {
+            val unit = min(h, w * 0.46f)
+            val small = unit * 0.076f
+            val face = unit * 0.09f
+            place(btnL2, w * 0.09f, h * 0.14f, small)
+            place(btnR2, w * 0.91f, h * 0.14f, small)
+            place(dpad, w * 0.15f, h * 0.36f, unit * 0.20f)
+            place(leftStick, w * 0.34f, h * 0.74f, unit * 0.15f)
+            val fx = w * 0.85f
+            val fy = h * 0.52f
+            val off = unit * 0.165f
+            place(faceTop, fx, fy - off, face)
+            place(faceRight, fx + off, fy, face)
+            place(faceBottom, fx, fy + off, face)
+            place(faceLeft, fx - off, fy, face)
+            place(btnOptions, w * 0.50f, h * 0.22f, small)
+            place(btnHome, w * 0.50f, h * 0.50f, small)
+            place(gear, w * 0.05f, h * 0.90f, small * 0.9f)
+        }
+    }
+
     // --------------------------------------------------------------- drawing
 
     private val bgPaint = Paint()
@@ -1192,6 +1753,7 @@ class ControllerView @JvmOverloads constructor(
                 canvas.drawCircle(control.cx, control.cy, control.radius * 1.08f, strokePaint)
             }
             strokePaint.alpha = 255
+            drawEditUi(canvas)
         }
     }
 
@@ -1334,6 +1896,19 @@ class ControllerView @JvmOverloads constructor(
 
     /** In edit mode, fingers drag controls instead of pressing them. */
     private fun handleEditTouch(event: MotionEvent) {
+        // MOD: the AJUSTES pill and its panel get the first chance at a tap.
+        if (event.actionMasked == MotionEvent.ACTION_DOWN ||
+            event.actionMasked == MotionEvent.ACTION_POINTER_DOWN
+        ) {
+            val idx = event.actionIndex
+            if (handleEditUiTap(event.getX(idx), event.getY(idx))) {
+                invalidate()
+                return
+            }
+        }
+        // While the panel is open, nothing underneath should move.
+        if (settingsOpen && activeControls.none { it.pressed }) return
+
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val index = event.actionIndex
