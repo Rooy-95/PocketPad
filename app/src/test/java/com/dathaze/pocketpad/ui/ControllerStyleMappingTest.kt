@@ -21,6 +21,10 @@ import java.io.File
  *
  * What this does NOT prove: that the view renders, hit-tests or dispatches
  * touches correctly. That needs an instrumented or real-device test.
+ *
+ * MOD: the HID button numbers below follow the order Android expects from a
+ * Game Pad (A, B, C, X, Y, Z, L1, R1, L2, R2, SELECT, START, MODE, THUMBL,
+ * THUMBR). HID buttons 3 and 6 (Android's C and Z) are unused.
  */
 class ControllerStyleMappingTest {
 
@@ -206,6 +210,27 @@ class ControllerStyleMappingTest {
         }
     }
 
+    /**
+     * MOD: pins the button order Android expects, so it cannot be changed back
+     * to the old Windows order by accident.
+     */
+    @Test
+    fun hidButtonOrderMatchesAndroidGamePad() {
+        assertEquals(1, HidConstants.BTN_CROSS + 1)
+        assertEquals(2, HidConstants.BTN_CIRCLE + 1)
+        assertEquals(4, HidConstants.BTN_SQUARE + 1)
+        assertEquals(5, HidConstants.BTN_TRIANGLE + 1)
+        assertEquals(7, HidConstants.BTN_L1 + 1)
+        assertEquals(8, HidConstants.BTN_R1 + 1)
+        assertEquals(9, HidConstants.BTN_L2 + 1)
+        assertEquals(10, HidConstants.BTN_R2 + 1)
+        assertEquals(11, HidConstants.BTN_SHARE + 1)
+        assertEquals(12, HidConstants.BTN_OPTIONS + 1)
+        assertEquals(13, HidConstants.BTN_PS + 1)
+        assertEquals(14, HidConstants.BTN_L3 + 1)
+        assertEquals(15, HidConstants.BTN_R3 + 1)
+    }
+
     // ------------------------------------------- per-style expected mappings
 
     /** Assert a style's labels and the HID button each one sends. */
@@ -227,16 +252,16 @@ class ControllerStyleMappingTest {
         assertStyle("PS", mapOf(
             "faceBottom" to ("✕" to 1),
             "faceRight" to ("○" to 2),
-            "faceLeft" to ("□" to 3),
-            "faceTop" to ("△" to 4),
-            "btnL1" to ("L1" to 5),
-            "btnR1" to ("R1" to 6),
-            "btnL2" to ("L2" to 7),
-            "btnR2" to ("R2" to 8),
-            "btnShare" to ("SHARE" to 9),
-            "btnOptions" to ("OPTIONS" to 10),
-            "btnL3" to ("L3" to 11),
-            "btnR3" to ("R3" to 12),
+            "faceLeft" to ("□" to 4),
+            "faceTop" to ("△" to 5),
+            "btnL1" to ("L1" to 7),
+            "btnR1" to ("R1" to 8),
+            "btnL2" to ("L2" to 9),
+            "btnR2" to ("R2" to 10),
+            "btnShare" to ("SHARE" to 11),
+            "btnOptions" to ("OPTIONS" to 12),
+            "btnL3" to ("L3" to 14),
+            "btnR3" to ("R3" to 15),
             "btnHome" to ("PS" to 13)
         ))
         assertEquals("PlayStation shows the full pad", 17, styleActive["PS"]!!.size)
@@ -247,16 +272,16 @@ class ControllerStyleMappingTest {
         assertStyle("XBOX", mapOf(
             "faceBottom" to ("A" to 1),
             "faceRight" to ("B" to 2),
-            "faceLeft" to ("X" to 3),
-            "faceTop" to ("Y" to 4),
-            "btnL1" to ("LB" to 5),
-            "btnR1" to ("RB" to 6),
-            "btnL2" to ("LT" to 7),
-            "btnR2" to ("RT" to 8),
-            "btnShare" to ("VIEW" to 9),
-            "btnOptions" to ("MENU" to 10),
-            "btnL3" to ("LS" to 11),
-            "btnR3" to ("RS" to 12)
+            "faceLeft" to ("X" to 4),
+            "faceTop" to ("Y" to 5),
+            "btnL1" to ("LB" to 7),
+            "btnR1" to ("RB" to 8),
+            "btnL2" to ("LT" to 9),
+            "btnR2" to ("RT" to 10),
+            "btnShare" to ("VIEW" to 11),
+            "btnOptions" to ("MENU" to 12),
+            "btnL3" to ("LS" to 14),
+            "btnR3" to ("RS" to 15)
         ))
         assertEquals("Xbox shows the full pad", 17, styleActive["XBOX"]!!.size)
     }
@@ -266,12 +291,12 @@ class ControllerStyleMappingTest {
         assertStyle("SNES", mapOf(
             "faceBottom" to ("B" to 1),
             "faceRight" to ("A" to 2),
-            "faceLeft" to ("Y" to 3),
-            "faceTop" to ("X" to 4),
-            "btnL1" to ("L" to 5),
-            "btnR1" to ("R" to 6),
-            "btnShare" to ("SELECT" to 9),
-            "btnOptions" to ("START" to 10)
+            "faceLeft" to ("Y" to 4),
+            "faceTop" to ("X" to 5),
+            "btnL1" to ("L" to 7),
+            "btnR1" to ("R" to 8),
+            "btnShare" to ("SELECT" to 11),
+            "btnOptions" to ("START" to 12)
         ))
         val active = styleActive["SNES"]!!
         assertTrue("SNES has no analog sticks", !active.contains("leftStick"))
@@ -284,8 +309,8 @@ class ControllerStyleMappingTest {
         assertStyle("NES", mapOf(
             "faceBottom" to ("B" to 1),
             "faceRight" to ("A" to 2),
-            "btnShare" to ("SELECT" to 9),
-            "btnOptions" to ("START" to 10)
+            "btnShare" to ("SELECT" to 11),
+            "btnOptions" to ("START" to 12)
         ))
         val active = styleActive["NES"]!!
         assertTrue("NES has only two face buttons", !active.contains("faceTop"))
@@ -298,8 +323,8 @@ class ControllerStyleMappingTest {
         assertStyle("GAMEBOY", mapOf(
             "faceBottom" to ("B" to 1),
             "faceRight" to ("A" to 2),
-            "btnShare" to ("SELECT" to 9),
-            "btnOptions" to ("START" to 10)
+            "btnShare" to ("SELECT" to 11),
+            "btnOptions" to ("START" to 12)
         ))
         assertEquals(
             "Game Boy and NES share one control set",
@@ -373,8 +398,8 @@ class ControllerStyleMappingTest {
         }
         assertEquals(1, hidButtonOf("faceBottom"))
         assertEquals(2, hidButtonOf("faceRight"))
-        assertEquals(3, hidButtonOf("faceLeft"))
-        assertEquals(4, hidButtonOf("faceTop"))
+        assertEquals(4, hidButtonOf("faceLeft"))
+        assertEquals(5, hidButtonOf("faceTop"))
     }
 
     // ---------------------------------------------------------- layouts
