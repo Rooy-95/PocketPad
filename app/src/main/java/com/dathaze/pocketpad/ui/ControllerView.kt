@@ -236,7 +236,21 @@ class ControllerView @JvmOverloads constructor(
             }
         }
 
+        // A very short tap can press and release inside one emulator frame, so the
+        // game never sees it. Hold every press for at least this long.
+        private val minPressMs = 70L
+        private var downAt = 0L
+        private val releaseRunnable = Runnable { release() }
+
+        private fun release() {
+            touchState.setButton(buttonIndex, false)
+            setTrigger(0)
+            notifyChanged()
+        }
+
         override fun onDown(x: Float, y: Float) {
+            removeCallbacks(releaseRunnable)
+            downAt = SystemClock.uptimeMillis()
             touchState.setButton(buttonIndex, true)
             setTrigger(255)
             // Transmit first, buzz second. The vibrator call takes a moment to
@@ -248,9 +262,12 @@ class ControllerView @JvmOverloads constructor(
 
         override fun onUp() {
             if (isHome) removeCallbacks(longPressRunnable)
-            touchState.setButton(buttonIndex, false)
-            setTrigger(0)
-            notifyChanged()
+            val held = SystemClock.uptimeMillis() - downAt
+            if (held >= minPressMs) {
+                release()
+            } else {
+                postDelayed(releaseRunnable, minPressMs - held)
+            }
         }
 
         /** L2/R2 are triggers, so they drive the analog axis as well as the
@@ -323,15 +340,32 @@ class ControllerView @JvmOverloads constructor(
 
     /** Eight-way d-pad driving the HID hat switch. */
     private inner class Dpad : Control() {
+        private val minPressMs = 70L
+        private var downAt = 0L
+        private val releaseRunnable = Runnable {
+            touchState.hat = HidConstants.HAT_NEUTRAL
+            notifyChanged()
+        }
+
         override fun onDown(x: Float, y: Float) {
+            removeCallbacks(releaseRunnable)
+            downAt = SystemClock.uptimeMillis()
             update(x, y, first = true)
         }
 
-        override fun onMove(x: Float, y: Float) = update(x, y, first = false)
+        override fun onMove(x: Float, y: Float) {
+            removeCallbacks(releaseRunnable)
+            update(x, y, first = false)
+        }
 
         override fun onUp() {
-            touchState.hat = HidConstants.HAT_NEUTRAL
-            notifyChanged()
+            val held = SystemClock.uptimeMillis() - downAt
+            if (held >= minPressMs) {
+                touchState.hat = HidConstants.HAT_NEUTRAL
+                notifyChanged()
+            } else {
+                postDelayed(releaseRunnable, minPressMs - held)
+            }
         }
 
         private fun update(x: Float, y: Float, first: Boolean) {
@@ -524,7 +558,13 @@ class ControllerView @JvmOverloads constructor(
                 ny = 0f
             } else {
                 val scaled = ((mag - dz) / (1f - dz)) * (sensitivityPct / 100f)
-                val k = min(scaled, 1f) / mag
+                val clamped = min(scaled, 1f)
+                val curved = if (curvePct > 0) {
+                    Math.pow(clamped.toDouble(), 1.0 + curvePct / 50.0).toFloat()
+                } else {
+                    clamped
+                }
+                val k = curved / mag
                 nx *= k
                 ny *= k
             }
@@ -785,6 +825,12 @@ class ControllerView @JvmOverloads constructor(
     /** Size of the sticks and the d-pad, in percent (60..200). */
     private var stickSizePct = layoutPrefs.getInt("stick_size", 100)
 
+    /** Size of the d-pad on its own, in percent. */
+    private var dpadSizePct = layoutPrefs.getInt("dpad_size", 100)
+
+    /** Response curve of the sticks, 0 (linear) to 100 (very soft around the centre). */
+    private var curvePct = layoutPrefs.getInt("curve", 0)
+
     /** Radial dead zone of the analog sticks, in percent (0..30). */
     private var deadzonePct = layoutPrefs.getInt("deadzone", 0)
 
@@ -818,7 +864,8 @@ class ControllerView @JvmOverloads constructor(
 
     private fun scaleFor(c: Control): Float = when {
         c === gear -> 1f
-        c === dpad || c === leftStick || c === rightStick -> stickSizePct / 100f
+        c === dpad -> dpadSizePct / 100f
+        c === leftStick || c === rightStick -> stickSizePct / 100f
         else -> buttonSizePct / 100f
     }
 
@@ -830,11 +877,13 @@ class ControllerView @JvmOverloads constructor(
 
     private fun adjustSetting(row: Int, dir: Int) {
         when (row) {
-            0 -> buttonSizePct = (buttonSizePct + dir * 10).coerceIn(60, 200)
-            1 -> stickSizePct = (stickSizePct + dir * 10).coerceIn(60, 200)
-            2 -> deadzonePct = (deadzonePct + dir).coerceIn(0, 30)
-            3 -> sensitivityPct = (sensitivityPct + dir * 5).coerceIn(50, 150)
-            4 -> {
+            0 -> buttonSizePct = (buttonSizePct + dir * 10).coerceIn(50, 250)
+            1 -> dpadSizePct = (dpadSizePct + dir * 10).coerceIn(50, 250)
+            2 -> stickSizePct = (stickSizePct + dir * 10).coerceIn(50, 250)
+            3 -> deadzonePct = (deadzonePct + dir).coerceIn(0, 50)
+            4 -> sensitivityPct = (sensitivityPct + dir * 5).coerceIn(10, 200)
+            5 -> curvePct = (curvePct + dir * 5).coerceIn(0, 100)
+            6 -> {
                 val all = Extra.values()
                 setExtraStyle(all[(extra.ordinal + dir + all.size) % all.size])
             }
@@ -842,11 +891,13 @@ class ControllerView @JvmOverloads constructor(
         layoutPrefs.edit()
             .putInt("btn_size", buttonSizePct)
             .putInt("stick_size", stickSizePct)
+            .putInt("dpad_size", dpadSizePct)
+            .putInt("curve", curvePct)
             .putInt("deadzone", deadzonePct)
             .putInt("sensitivity", sensitivityPct)
             .apply()
         haptics.tick()
-        if (row < 2) applyScales() else invalidate()
+        if (row < 3) applyScales() else invalidate()
     }
 
     // ------------------------------------------- MOD: edit-mode settings UI
@@ -855,9 +906,9 @@ class ControllerView @JvmOverloads constructor(
     private val pillRect = RectF()
     private val panelRect = RectF()
     private val closeRect = RectF()
-    private val minusRects = Array(5) { RectF() }
-    private val plusRects = Array(5) { RectF() }
-    private val panelLabels = arrayOf("Botones", "Sticks y cruz", "Zona muerta", "Sensibilidad", "Diseño")
+    private val minusRects = Array(7) { RectF() }
+    private val plusRects = Array(7) { RectF() }
+    private val panelLabels = arrayOf("Botones", "Cruceta", "Sticks", "Zona muerta", "Sensibilidad", "Curva", "Diseño")
     private val panelFill = Color.parseColor("#1B1E2A")
     private val panelButtonFill = Color.parseColor("#2C3048")
 
@@ -870,17 +921,17 @@ class ControllerView @JvmOverloads constructor(
         val pillTop = safeTop + 6f * d
         pillRect.set((width - pillW) / 2f, pillTop, (width + pillW) / 2f, pillTop + pillH)
 
-        val rowH = 44f * d
-        val headH = 40f * d
-        val footH = 52f * d
+        val rowH = 34f * d
+        val headH = 34f * d
+        val footH = 46f * d
         val panelW = min(width.toFloat() - 24f * d, 420f * d)
-        val panelH = headH + rowH * 5 + footH
+        val panelH = headH + rowH * 7 + footH
         val left = (width - panelW) / 2f
         val top = max(safeTop + 8f * d, (height - panelH) / 2f)
         panelRect.set(left, top, left + panelW, top + panelH)
 
-        val btn = 40f * d
-        for (i in 0 until 5) {
+        val btn = 32f * d
+        for (i in 0 until 7) {
             val rowCy = top + headH + rowH * i + rowH / 2f
             val plusRight = left + panelW - 12f * d
             plusRects[i].set(plusRight - btn, rowCy - btn / 2f, plusRight, rowCy + btn / 2f)
@@ -929,14 +980,14 @@ class ControllerView @JvmOverloads constructor(
         strokePaint.color = outlineColor
         canvas.drawRoundRect(panelRect, 18f * d, 18f * d, strokePaint)
         drawLabel(
-            canvas, "Ajustes del mando", panelRect.centerX(), panelRect.top + 26f * d,
+            canvas, "Ajustes del mando", panelRect.centerX(), panelRect.top + 20f * d,
             16f * d, textColor
         )
 
         val values = arrayOf(
-            "$buttonSizePct%", "$stickSizePct%", "$deadzonePct%", "$sensitivityPct%", extra.title
+            "$buttonSizePct%", "$dpadSizePct%", "$stickSizePct%", "$deadzonePct%", "$sensitivityPct%", "$curvePct%", extra.title
         )
-        for (i in 0 until 5) {
+        for (i in 0 until 7) {
             val rowCy = minusRects[i].centerY()
             drawLabel(
                 canvas, panelLabels[i], panelRect.left + 16f * d, rowCy, 13f * d, textColor,
@@ -967,7 +1018,7 @@ class ControllerView @JvmOverloads constructor(
                 settingsOpen = false
                 return true
             }
-            for (i in 0 until 5) {
+            for (i in 0 until 7) {
                 if (minusRects[i].contains(x, y)) {
                     adjustSetting(i, -1)
                     return true
