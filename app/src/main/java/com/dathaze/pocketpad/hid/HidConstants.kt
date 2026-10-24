@@ -26,23 +26,27 @@ object HidConstants {
     const val KEY_DOWN: Byte = 0x51
     const val KEY_UP: Byte = 0x52
 
-    // Bit indices into the 16-bit button field. The order is the standard
-    // gamepad numbering every host expects — A/B/X/Y, bumpers, triggers,
-    // View, Menu, stick clicks, then Guide. Getting this order wrong makes a
-    // host read the wrong control entirely.
+    // Bit indices into the 16-bit button field.
+    //
+    // MOD: this is the order Android itself expects from a Game Pad. Android
+    // numbers HID buttons 1, 2, 3... as A, B, C, X, Y, Z, L1, R1, L2, R2,
+    // SELECT, START, MODE, THUMBL, THUMBR. The old order (A, B, X, Y, LB...)
+    // is the Windows/web one, and on Android it shifted every button after B:
+    // Square arrived as C, Triangle as X, START/SELECT as L2/R2 and so on.
+    // Bits 2 and 5 are left unused on purpose (Android's C and Z).
     const val BTN_CROSS = 0      // button 1  — A / Cross
     const val BTN_CIRCLE = 1     // button 2  — B / Circle
-    const val BTN_SQUARE = 2     // button 3  — X / Square
-    const val BTN_TRIANGLE = 3   // button 4  — Y / Triangle
-    const val BTN_L1 = 4         // button 5  — LB / L1
-    const val BTN_R1 = 5         // button 6  — RB / R1
-    const val BTN_L2 = 6         // button 7  — LT / L2
-    const val BTN_R2 = 7         // button 8  — RT / R2
-    const val BTN_SHARE = 8      // button 9  — View / Back / Select
-    const val BTN_OPTIONS = 9    // button 10 — Menu / Start
-    const val BTN_L3 = 10        // button 11 — left stick click
-    const val BTN_R3 = 11        // button 12 — right stick click
-    const val BTN_PS = 12        // button 13 — Guide / PS / Xbox
+    const val BTN_SQUARE = 3     // button 4  — X / Square
+    const val BTN_TRIANGLE = 4   // button 5  — Y / Triangle
+    const val BTN_L1 = 6         // button 7  — L1 / LB
+    const val BTN_R1 = 7         // button 8  — R1 / RB
+    const val BTN_L2 = 8         // button 9  — L2 / LT
+    const val BTN_R2 = 9         // button 10 — R2 / RT
+    const val BTN_SHARE = 10     // button 11 — Select / View / Back
+    const val BTN_OPTIONS = 11   // button 12 — Start / Menu
+    const val BTN_PS = 12        // button 13 — Mode / Guide / PS / Xbox
+    const val BTN_L3 = 13        // button 14 — left stick click
+    const val BTN_R3 = 14        // button 15 — right stick click
 
     // Hat switch values (0 = up, clockwise), 8 = released/neutral.
     const val HAT_NEUTRAL = 8
