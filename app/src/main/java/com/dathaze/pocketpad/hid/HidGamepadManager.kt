@@ -107,6 +107,9 @@ class HidGamepadManager(private val context: Context, private val listener: List
         started = false
         lastReport = null
         lastKey = HidConstants.KEY_NONE
+        stopHeartbeat()
+        clearPending()
+        latestReport = null
         // The callback executor owns a live thread; let it go with the app.
         executor.shutdown()
     }
@@ -150,6 +153,7 @@ class HidGamepadManager(private val context: Context, private val listener: List
      */
     fun send(state: GamepadState) {
         val report = state.toReport()
+        latestReport = report
         val last = lastReport
         if (last != null && last.contentEquals(report)) {
             clearPending()
@@ -173,6 +177,32 @@ class HidGamepadManager(private val context: Context, private val listener: List
             pendingTries = 0
             mainHandler.postDelayed(flushRunnable, RETRY_INTERVAL_MS)
         }
+    }
+
+    // MOD: the host is reminded of the current state every few tens of milliseconds
+    // while nothing else is being sent. If a report is lost on the way, the next
+    // reminder repairs it, so a button can no longer stay "stuck" pressed (or never
+    // register) just because a single packet was dropped.
+    private var latestReport: ByteArray? = null
+
+    private val heartbeatRunnable = object : Runnable {
+        override fun run() {
+            if (connectedDevice == null) return
+            val r = latestReport
+            if (r != null && SystemClock.uptimeMillis() - lastSentAt >= HEARTBEAT_MS) {
+                transmit(r)
+            }
+            mainHandler.postDelayed(this, HEARTBEAT_MS)
+        }
+    }
+
+    private fun startHeartbeat() {
+        mainHandler.removeCallbacks(heartbeatRunnable)
+        mainHandler.postDelayed(heartbeatRunnable, HEARTBEAT_MS)
+    }
+
+    private fun stopHeartbeat() {
+        mainHandler.removeCallbacks(heartbeatRunnable)
     }
 
     // MOD: a report the Bluetooth stack refuses is retried instead of being forgotten.
@@ -308,6 +338,7 @@ class HidGamepadManager(private val context: Context, private val listener: List
             when (state) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     connectedDevice = device
+                    startHeartbeat()
                     post { listener.onHidConnected(device) }
                 }
                 BluetoothProfile.STATE_CONNECTING ->
@@ -317,6 +348,8 @@ class HidGamepadManager(private val context: Context, private val listener: List
                     lastReport = null
                     lastKey = HidConstants.KEY_NONE
                     clearPending()
+                    stopHeartbeat()
+                    latestReport = null
                     post { listener.onHidDisconnected() }
                 }
             }
@@ -391,6 +424,7 @@ class HidGamepadManager(private val context: Context, private val listener: List
         const val MAX_REREGISTER_ATTEMPTS = 4
         const val AXIS_MIN_INTERVAL_MS = 10L
         const val RETRY_INTERVAL_MS = 10L
+        const val HEARTBEAT_MS = 30L
         const val MAX_RETRIES = 6
     }
 }
