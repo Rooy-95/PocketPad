@@ -369,9 +369,71 @@ class ControllerView @JvmOverloads constructor(
     private inner class Dpad : Control() {
         private val minPressMs = 70L
         private var downAt = 0L
-        private val releaseRunnable = Runnable {
-            touchState.hat = HidConstants.HAT_NEUTRAL
-            notifyChanged()
+
+        /** Direction drawn on screen (in soft mode the hat itself stays neutral). */
+        private var shownHat = HidConstants.HAT_NEUTRAL
+
+        // Soft mode: the held direction ramps the left stick from softStart to full.
+        private val softStart = 0.30f
+        private var softDx = 0f
+        private var softDy = 0f
+        private var softLevel = 0f
+        private var softLast = 0L
+
+        private val releaseRunnable = Runnable { setDirection(HidConstants.HAT_NEUTRAL) }
+
+        private val softRunnable = object : Runnable {
+            override fun run() {
+                if (softDx == 0f && softDy == 0f) return
+                val now = SystemClock.uptimeMillis()
+                softLevel = min(1f, softLevel + (now - softLast) / dpadRampMs.toFloat())
+                softLast = now
+                applySoft()
+                postDelayed(this, 10)
+            }
+        }
+
+        private fun applySoft() {
+            val gain = softStart + (1f - softStart) * softLevel
+            val ax = (128 + softDx * gain * 127).roundToInt().coerceIn(0, 255)
+            val ay = (128 + softDy * gain * 127).roundToInt().coerceIn(0, 255)
+            if (touchState.lx != ax || touchState.ly != ay) {
+                touchState.lx = ax
+                touchState.ly = ay
+                notifyChanged()
+            }
+        }
+
+        /** Apply a direction (0..7, or HAT_NEUTRAL) either to the hat or to the soft stick. */
+        private fun setDirection(newHat: Int) {
+            shownHat = newHat
+            if (!dpadSoft) {
+                touchState.hat = newHat
+                notifyChanged()
+                return
+            }
+            removeCallbacks(softRunnable)
+            when (newHat) {
+                0 -> { softDx = 0f; softDy = -1f }
+                1 -> { softDx = 0.707f; softDy = -0.707f }
+                2 -> { softDx = 1f; softDy = 0f }
+                3 -> { softDx = 0.707f; softDy = 0.707f }
+                4 -> { softDx = 0f; softDy = 1f }
+                5 -> { softDx = -0.707f; softDy = 0.707f }
+                6 -> { softDx = -1f; softDy = 0f }
+                7 -> { softDx = -0.707f; softDy = -0.707f }
+                else -> { softDx = 0f; softDy = 0f }
+            }
+            if (softDx == 0f && softDy == 0f) {
+                touchState.lx = 128
+                touchState.ly = 128
+                notifyChanged()
+            } else {
+                softLevel = 0f
+                softLast = SystemClock.uptimeMillis()
+                applySoft()
+                postDelayed(softRunnable, 10)
+            }
         }
 
         override fun onDown(x: Float, y: Float) {
@@ -388,8 +450,7 @@ class ControllerView @JvmOverloads constructor(
         override fun onUp() {
             val held = SystemClock.uptimeMillis() - downAt
             if (held >= minPressMs) {
-                touchState.hat = HidConstants.HAT_NEUTRAL
-                notifyChanged()
+                setDirection(HidConstants.HAT_NEUTRAL)
             } else {
                 postDelayed(releaseRunnable, minPressMs - held)
             }
@@ -406,9 +467,8 @@ class ControllerView @JvmOverloads constructor(
                 val deg = (Math.toDegrees(atan2(dx.toDouble(), -dy.toDouble())) + 360.0) % 360.0
                 ((deg + 22.5) / 45.0).toInt() % 8
             }
-            if (newHat != touchState.hat) {
-                touchState.hat = newHat
-                notifyChanged()
+            if (newHat != shownHat) {
+                setDirection(newHat)
                 if (first) haptics.press() else haptics.tick()
             } else if (first) {
                 haptics.press()
@@ -425,7 +485,7 @@ class ControllerView @JvmOverloads constructor(
         override fun draw(canvas: Canvas) {
             val arm = radius * 0.30f
             val len = radius * 0.84f
-            val hat = touchState.hat
+            val hat = shownHat
             val up = hat == 7 || hat == 0 || hat == 1
             val right = hat == 1 || hat == 2 || hat == 3
             val down = hat == 3 || hat == 4 || hat == 5
@@ -858,6 +918,12 @@ class ControllerView @JvmOverloads constructor(
     /** Response curve of the sticks, 0 (linear) to 100 (very soft around the centre). */
     private var curvePct = layoutPrefs.getInt("curve", 0)
 
+    /** Soft d-pad: the d-pad drives the left stick and ramps up while it is held. */
+    private var dpadSoft = layoutPrefs.getInt("dpad_soft", 0) == 1
+
+    /** Milliseconds the soft d-pad takes to go from its first nudge to full deflection. */
+    private var dpadRampMs = layoutPrefs.getInt("dpad_ramp", 350)
+
     /** Radial dead zone of the analog sticks, in percent (0..30). */
     private var deadzonePct = layoutPrefs.getInt("deadzone", 0)
 
@@ -911,6 +977,11 @@ class ControllerView @JvmOverloads constructor(
             4 -> sensitivityPct = (sensitivityPct + dir * 5).coerceIn(10, 200)
             5 -> curvePct = (curvePct + dir * 5).coerceIn(0, 100)
             6 -> {
+                dpadSoft = !dpadSoft
+                releaseAllPointers()
+            }
+            7 -> dpadRampMs = (dpadRampMs + dir * 50).coerceIn(100, 1500)
+            8 -> {
                 val all = Extra.values()
                 setExtraStyle(all[(extra.ordinal + dir + all.size) % all.size])
             }
@@ -922,6 +993,8 @@ class ControllerView @JvmOverloads constructor(
             .putInt("curve", curvePct)
             .putInt("deadzone", deadzonePct)
             .putInt("sensitivity", sensitivityPct)
+            .putInt("dpad_soft", if (dpadSoft) 1 else 0)
+            .putInt("dpad_ramp", dpadRampMs)
             .apply()
         haptics.tick()
         if (row < 3) applyScales() else invalidate()
@@ -930,16 +1003,27 @@ class ControllerView @JvmOverloads constructor(
     // ------------------------------------------- MOD: edit-mode settings UI
 
     private var settingsOpen = false
+    private var panelPage = 0
     private val pillRect = RectF()
     private val panelRect = RectF()
     private val closeRect = RectF()
-    private val minusRects = Array(7) { RectF() }
-    private val plusRects = Array(7) { RectF() }
-    private val panelLabels = arrayOf("Botones", "Cruceta", "Sticks", "Zona muerta", "Sensibilidad", "Curva", "Diseño")
+    private val pageRect = RectF()
+    private val minusRects = Array(5) { RectF() }
+    private val plusRects = Array(5) { RectF() }
+    private val panelLabels = arrayOf(
+        "Botones", "Cruceta", "Sticks", "Zona muerta", "Sensibilidad",
+        "Curva", "Cruceta suave", "Rampa", "Diseño"
+    )
     private val panelFill = Color.parseColor("#1B1E2A")
     private val panelButtonFill = Color.parseColor("#2C3048")
 
     private val dp: Float get() = resources.displayMetrics.density
+
+    private val rowsPerPage = 5
+    private val totalRows = 9
+    private val pageCount = 2
+
+    private fun rowsOnPage(): Int = min(rowsPerPage, totalRows - panelPage * rowsPerPage)
 
     private fun computeEditUi() {
         val d = dp
@@ -948,30 +1032,30 @@ class ControllerView @JvmOverloads constructor(
         val pillTop = safeTop + 6f * d
         pillRect.set((width - pillW) / 2f, pillTop, (width + pillW) / 2f, pillTop + pillH)
 
-        val rowH = 34f * d
+        val rowH = 38f * d
         val headH = 34f * d
         val footH = 46f * d
         val panelW = min(width.toFloat() - 24f * d, 420f * d)
-        val panelH = headH + rowH * 7 + footH
+        val panelH = headH + rowH * rowsPerPage + footH
         val left = (width - panelW) / 2f
         val top = max(safeTop + 8f * d, (height - panelH) / 2f)
         panelRect.set(left, top, left + panelW, top + panelH)
 
-        val btn = 32f * d
-        for (i in 0 until 7) {
+        val btn = 34f * d
+        for (i in 0 until rowsPerPage) {
             val rowCy = top + headH + rowH * i + rowH / 2f
             val plusRight = left + panelW - 12f * d
             plusRects[i].set(plusRight - btn, rowCy - btn / 2f, plusRight, rowCy + btn / 2f)
             val minusRight = plusRects[i].left - 110f * d
             minusRects[i].set(minusRight - btn, rowCy - btn / 2f, minusRight, rowCy + btn / 2f)
         }
-        val closeW = 140f * d
-        closeRect.set(
-            left + (panelW - closeW) / 2f,
-            top + panelH - footH + 8f * d,
-            left + (panelW + closeW) / 2f,
-            top + panelH - 8f * d
-        )
+        val footTop = top + panelH - footH + 8f * d
+        val footBottom = top + panelH - 8f * d
+        val bw = 120f * d
+        val gap = 12f * d
+        val startX = left + (panelW - (bw * 2 + gap)) / 2f
+        pageRect.set(startX, footTop, startX + bw, footBottom)
+        closeRect.set(startX + bw + gap, footTop, startX + bw * 2 + gap, footBottom)
     }
 
     private fun drawLabel(
@@ -1012,12 +1096,15 @@ class ControllerView @JvmOverloads constructor(
         )
 
         val values = arrayOf(
-            "$buttonSizePct%", "$dpadSizePct%", "$stickSizePct%", "$deadzonePct%", "$sensitivityPct%", "$curvePct%", extra.title
+            "$buttonSizePct%", "$dpadSizePct%", "$stickSizePct%", "$deadzonePct%",
+            "$sensitivityPct%", "$curvePct%", if (dpadSoft) "Sí" else "No",
+            "$dpadRampMs ms", extra.title
         )
-        for (i in 0 until 7) {
+        for (i in 0 until rowsOnPage()) {
+            val row = panelPage * rowsPerPage + i
             val rowCy = minusRects[i].centerY()
             drawLabel(
-                canvas, panelLabels[i], panelRect.left + 16f * d, rowCy, 13f * d, textColor,
+                canvas, panelLabels[row], panelRect.left + 16f * d, rowCy, 13f * d, textColor,
                 Paint.Align.LEFT
             )
             for (r in arrayOf(minusRects[i], plusRects[i])) {
@@ -1027,11 +1114,17 @@ class ControllerView @JvmOverloads constructor(
             drawLabel(canvas, "−", minusRects[i].centerX(), minusRects[i].centerY(), 24f * d, textColor)
             drawLabel(canvas, "+", plusRects[i].centerX(), plusRects[i].centerY(), 24f * d, textColor)
             drawLabel(
-                canvas, values[i], (minusRects[i].right + plusRects[i].left) / 2f, rowCy,
+                canvas, values[row], (minusRects[i].right + plusRects[i].left) / 2f, rowCy,
                 14f * d, neonCyan
             )
         }
 
+        moldPaint.color = panelButtonFill
+        canvas.drawRoundRect(pageRect, 12f * d, 12f * d, moldPaint)
+        drawLabel(
+            canvas, "Página ${panelPage + 1}/$pageCount", pageRect.centerX(), pageRect.centerY(),
+            14f * d, textColor
+        )
         moldPaint.color = accentColor
         canvas.drawRoundRect(closeRect, 12f * d, 12f * d, moldPaint)
         drawLabel(canvas, "Cerrar", closeRect.centerX(), closeRect.centerY(), 15f * d, Color.WHITE)
@@ -1045,13 +1138,19 @@ class ControllerView @JvmOverloads constructor(
                 settingsOpen = false
                 return true
             }
-            for (i in 0 until 7) {
+            if (pageRect.contains(x, y)) {
+                panelPage = (panelPage + 1) % pageCount
+                haptics.tick()
+                return true
+            }
+            for (i in 0 until rowsOnPage()) {
+                val row = panelPage * rowsPerPage + i
                 if (minusRects[i].contains(x, y)) {
-                    adjustSetting(i, -1)
+                    adjustSetting(row, -1)
                     return true
                 }
                 if (plusRects[i].contains(x, y)) {
-                    adjustSetting(i, 1)
+                    adjustSetting(row, 1)
                     return true
                 }
             }
