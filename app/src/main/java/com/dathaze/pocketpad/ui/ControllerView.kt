@@ -404,35 +404,85 @@ class ControllerView @JvmOverloads constructor(
             }
         }
 
-        /** Apply a direction (0..7, or HAT_NEUTRAL) either to the hat or to the soft stick. */
+        // Pulse mode: the direction is pressed for a share of each period; the share
+        // grows from softStart to 100% over dpadRampMs.
+        private val pulsePeriodMs = 60L
+        private var pulseDir = HidConstants.HAT_NEUTRAL
+        private var pulseOn = false
+
+        private val pulseRunnable = object : Runnable {
+            override fun run() {
+                if (pulseDir == HidConstants.HAT_NEUTRAL) return
+                val now = SystemClock.uptimeMillis()
+                softLevel = min(1f, softLevel + (now - softLast) / dpadRampMs.toFloat())
+                softLast = now
+                val duty = softStart + (1f - softStart) * softLevel
+                if (duty >= 0.95f) {
+                    if (!pulseOn) {
+                        pulseOn = true
+                        touchState.hat = pulseDir
+                        notifyChanged()
+                    }
+                    postDelayed(this, 10)
+                } else if (pulseOn) {
+                    pulseOn = false
+                    touchState.hat = HidConstants.HAT_NEUTRAL
+                    notifyChanged()
+                    postDelayed(this, max(1L, ((1f - duty) * pulsePeriodMs).toLong()))
+                } else {
+                    pulseOn = true
+                    touchState.hat = pulseDir
+                    notifyChanged()
+                    postDelayed(this, max(1L, (duty * pulsePeriodMs).toLong()))
+                }
+            }
+        }
+
+        /** Apply a direction (0..7, or HAT_NEUTRAL) in whichever mode is selected. */
         private fun setDirection(newHat: Int) {
             shownHat = newHat
-            if (!dpadSoft) {
-                touchState.hat = newHat
-                notifyChanged()
-                return
-            }
             removeCallbacks(softRunnable)
-            when (newHat) {
-                0 -> { softDx = 0f; softDy = -1f }
-                1 -> { softDx = 0.707f; softDy = -0.707f }
-                2 -> { softDx = 1f; softDy = 0f }
-                3 -> { softDx = 0.707f; softDy = 0.707f }
-                4 -> { softDx = 0f; softDy = 1f }
-                5 -> { softDx = -0.707f; softDy = 0.707f }
-                6 -> { softDx = -1f; softDy = 0f }
-                7 -> { softDx = -0.707f; softDy = -0.707f }
-                else -> { softDx = 0f; softDy = 0f }
-            }
-            if (softDx == 0f && softDy == 0f) {
-                touchState.lx = 128
-                touchState.ly = 128
-                notifyChanged()
-            } else {
-                softLevel = 0f
-                softLast = SystemClock.uptimeMillis()
-                applySoft()
-                postDelayed(softRunnable, 10)
+            removeCallbacks(pulseRunnable)
+            when (dpadSoftMode) {
+                0 -> {
+                    touchState.hat = newHat
+                    notifyChanged()
+                }
+                2 -> {
+                    pulseDir = newHat
+                    pulseOn = false
+                    if (newHat == HidConstants.HAT_NEUTRAL) {
+                        touchState.hat = HidConstants.HAT_NEUTRAL
+                        notifyChanged()
+                    } else {
+                        softLevel = 0f
+                        softLast = SystemClock.uptimeMillis()
+                        pulseRunnable.run()
+                    }
+                }
+                else -> {
+                    when (newHat) {
+                        0 -> { softDx = 0f; softDy = -1f }
+                        1 -> { softDx = 0.707f; softDy = -0.707f }
+                        2 -> { softDx = 1f; softDy = 0f }
+                        3 -> { softDx = 0.707f; softDy = 0.707f }
+                        4 -> { softDx = 0f; softDy = 1f }
+                        5 -> { softDx = -0.707f; softDy = 0.707f }
+                        6 -> { softDx = -1f; softDy = 0f }
+                        7 -> { softDx = -0.707f; softDy = -0.707f }
+                        else -> { softDx = 0f; softDy = 0f }
+                    }
+                    if (softDx == 0f && softDy == 0f) {
+                        touchState.lx = 128
+                        touchState.ly = 128
+                        notifyChanged()
+                    } else {
+                        softLevel = 0f
+                        softLast = SystemClock.uptimeMillis()
+                        applySoft()
+                        postDelayed(softRunnable, 10)
+                    }
+                }
             }
         }
 
@@ -918,8 +968,12 @@ class ControllerView @JvmOverloads constructor(
     /** Response curve of the sticks, 0 (linear) to 100 (very soft around the centre). */
     private var curvePct = layoutPrefs.getInt("curve", 0)
 
-    /** Soft d-pad: the d-pad drives the left stick and ramps up while it is held. */
-    private var dpadSoft = layoutPrefs.getInt("dpad_soft", 0) == 1
+    /**
+     * Soft d-pad: 0 = off (normal d-pad), 1 = the d-pad moves the left stick and ramps
+     * up while it is held, 2 = the d-pad presses and releases its direction in quick
+     * pulses that get longer the longer it is held (works with any game).
+     */
+    private var dpadSoftMode = layoutPrefs.getInt("dpad_soft", 0).coerceIn(0, 2)
 
     /** Milliseconds the soft d-pad takes to go from its first nudge to full deflection. */
     private var dpadRampMs = layoutPrefs.getInt("dpad_ramp", 350)
@@ -977,7 +1031,7 @@ class ControllerView @JvmOverloads constructor(
             4 -> sensitivityPct = (sensitivityPct + dir * 5).coerceIn(10, 200)
             5 -> curvePct = (curvePct + dir * 5).coerceIn(0, 100)
             6 -> {
-                dpadSoft = !dpadSoft
+                dpadSoftMode = (dpadSoftMode + dir + 3) % 3
                 releaseAllPointers()
             }
             7 -> dpadRampMs = (dpadRampMs + dir * 50).coerceIn(100, 1500)
@@ -993,7 +1047,7 @@ class ControllerView @JvmOverloads constructor(
             .putInt("curve", curvePct)
             .putInt("deadzone", deadzonePct)
             .putInt("sensitivity", sensitivityPct)
-            .putInt("dpad_soft", if (dpadSoft) 1 else 0)
+            .putInt("dpad_soft", dpadSoftMode)
             .putInt("dpad_ramp", dpadRampMs)
             .apply()
         haptics.tick()
@@ -1097,7 +1151,7 @@ class ControllerView @JvmOverloads constructor(
 
         val values = arrayOf(
             "$buttonSizePct%", "$dpadSizePct%", "$stickSizePct%", "$deadzonePct%",
-            "$sensitivityPct%", "$curvePct%", if (dpadSoft) "Sí" else "No",
+            "$sensitivityPct%", "$curvePct%", when (dpadSoftMode) { 1 -> "Stick"; 2 -> "Pulsos"; else -> "No" },
             "$dpadRampMs ms", extra.title
         )
         for (i in 0 until rowsOnPage()) {
